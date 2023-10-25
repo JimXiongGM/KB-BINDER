@@ -1,10 +1,11 @@
-import openai
 import json
-import spacy
-from time import sleep
-from bm25_trial import BM25_self
-import numpy as np
 import re
+from time import sleep
+
+import numpy as np
+import openai
+import spacy
+from bm25_trial import BM25_self
 
 
 def type_process(file_name):
@@ -16,23 +17,25 @@ def type_process(file_name):
             test_type_list.append(type)
     return test_type_list
 
+
 def ques_ans_process(file_name):
     return_dict_list = []
     with open(file_name) as f:
         lines = f.readlines()
         for line in lines:
             return_dict = {}
-            question, answers = line.split('\t')
-            answer_list = answers.split('|')
+            question, answers = line.split("\t")
+            answer_list = answers.split("|")
             answer_list[-1] = answer_list[-1].strip()
-            ent_s_idx = question.index('[')
-            ent_e_idx = question.index(']')
-            retrieved_ent = question[ent_s_idx+1:ent_e_idx]
+            ent_s_idx = question.index("[")
+            ent_e_idx = question.index("]")
+            retrieved_ent = question[ent_s_idx + 1 : ent_e_idx]
             return_dict["question"] = question
             return_dict["retrieved_ent"] = retrieved_ent
             return_dict["answer"] = answer_list
             return_dict_list.append(return_dict)
     return return_dict_list
+
 
 def type_generator(question):
     prompt = prompt_type
@@ -49,7 +52,7 @@ def type_generator(question):
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                stop=["Question: "]
+                stop=["Question: "],
             )
             got_result = True
         except:
@@ -58,15 +61,14 @@ def type_generator(question):
     return gene_exp
 
 
-
-openai.api_key = "" # need to be specified
+openai.api_key = ""  # need to be specified
 nlp = spacy.load("en_core_web_sm")
 
 enti_to_fact_dict = {}
-with open('data/data/metaQA/kb.txt') as f:
+with open("data/data/metaQA/kb.txt") as f:
     lines = f.readlines()
     for line in lines:
-        s, r, o = line.split('|')
+        s, r, o = line.split("|")
         if s.strip() not in enti_to_fact_dict:
             enti_to_fact_dict[s.strip()] = [line.strip()]
         else:
@@ -75,11 +77,11 @@ with open('data/data/metaQA/kb.txt') as f:
             enti_to_fact_dict[o.strip()] = [line.strip()]
         else:
             enti_to_fact_dict[o.strip()].append(line.strip())
-test_type_list_1hop = type_process('data/data/metaQA/qa_test_qtype_1hop.txt')
-train_type_list_1hop = type_process('data/data/metaQA/qa_train_qtype_1hop.txt')
+test_type_list_1hop = type_process("data/data/metaQA/qa_test_qtype_1hop.txt")
+train_type_list_1hop = type_process("data/data/metaQA/qa_train_qtype_1hop.txt")
 
-test_question_1hop = ques_ans_process('data/data/metaQA/qa_test_1hop.txt')
-train_question_1hop = ques_ans_process('data/data/metaQA/qa_train_1hop.txt')
+test_question_1hop = ques_ans_process("data/data/metaQA/qa_test_1hop.txt")
+train_question_1hop = ques_ans_process("data/data/metaQA/qa_train_1hop.txt")
 type_to_ques_dict = {}
 for type, que in zip(train_type_list_1hop, train_question_1hop):
     if type in type_to_ques_dict:
@@ -87,11 +89,19 @@ for type, que in zip(train_type_list_1hop, train_question_1hop):
     else:
         type_to_ques_dict[type] = [que["question"]]
 
-type_to_rela_dict = {"tag_to_movie": "has_tags", "writer_to_movie": "written_by", "movie_to_tags": "has_tags",
-                     "movie_to_year": "release_year", "movie_to_writer": "written_by", "movie_to_language": "in_language",
-                     "movie_to_genre": "has_genre", "director_to_movie": "directed_by", "movie_to_actor": "starred_actors",
-                     "movie_to_director": "directed_by", "actor_to_movie": "starred_actors"
-                     }
+type_to_rela_dict = {
+    "tag_to_movie": "has_tags",
+    "writer_to_movie": "written_by",
+    "movie_to_tags": "has_tags",
+    "movie_to_year": "release_year",
+    "movie_to_writer": "written_by",
+    "movie_to_language": "in_language",
+    "movie_to_genre": "has_genre",
+    "director_to_movie": "directed_by",
+    "movie_to_actor": "starred_actors",
+    "movie_to_director": "directed_by",
+    "actor_to_movie": "starred_actors",
+}
 
 types_all = list(type_to_rela_dict.keys())
 types_all_spl = [type_.split("_") for type_ in types_all]
@@ -117,7 +127,7 @@ for ques_dict in test_question_1hop:
     question_type = type_generator(question)
     print("question_type: ", question_type)
     if question_type not in type_to_rela_dict:
-        tokenized_query = re.split('_', question_type)
+        tokenized_query = re.split("_", question_type)
         tokenized_ques = question.split()
         tokenized_query = tokenized_query + tokenized_ques
         drops_query = []
@@ -159,11 +169,4 @@ for ques_dict in test_question_1hop:
     if set(pred) == set(ques_dict["answer"]):
         correct += 1
     total += 1
-    print("accuracy: ", correct/total)
-
-
-
-
-
-
-
+    print("accuracy: ", correct / total)

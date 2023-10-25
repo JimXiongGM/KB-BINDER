@@ -1,12 +1,14 @@
-import openai
 import json
-import spacy
 from time import sleep
+
+import openai
+import spacy
+
 nlp = spacy.load("en_core_web_sm")
-from bm25_trial import BM25_self
-import numpy as np
 import re
 
+import numpy as np
+from bm25_trial import BM25_self
 
 
 def type_process(file_name):
@@ -17,6 +19,8 @@ def type_process(file_name):
             type = line.strip()
             test_type_list.append(type)
     return test_type_list
+
+
 # test_type_list_1hop = type_process('data/data/metaQA/qa_test_qtype_1hop.txt')
 # train_type_list_1hop = type_process('data/data/metaQA/qa_train_qtype_1hop.txt')
 
@@ -27,17 +31,18 @@ def ques_ans_process(file_name):
         lines = f.readlines()
         for line in lines:
             return_dict = {}
-            question, answers = line.split('\t')
-            answer_list = answers.split('|')
+            question, answers = line.split("\t")
+            answer_list = answers.split("|")
             answer_list[-1] = answer_list[-1].strip()
-            ent_s_idx = question.index('[')
-            ent_e_idx = question.index(']')
-            retrieved_ent = question[ent_s_idx+1:ent_e_idx]
+            ent_s_idx = question.index("[")
+            ent_e_idx = question.index("]")
+            retrieved_ent = question[ent_s_idx + 1 : ent_e_idx]
             return_dict["question"] = question
             return_dict["retrieved_ent"] = retrieved_ent
             return_dict["answer"] = answer_list
             return_dict_list.append(return_dict)
     return return_dict_list
+
 
 # prompt_type = "Given the following types: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: what movies are about [ginger rogers] \nQuestion type: tag_to_movie\nQuestion: what movies was [Erik Matti] the writer of\nQuestion type: writer_to_movie\nQuestion: what topics is [Bad Timing] about\nQuestion type: movie_to_tags\nQuestion: [True Romance], when was it released\nQuestion type: movie_to_year\nQuestion: who wrote the screenplay for [True Romance]\nQuestion type: movie_to_writer\nQuestion: what language is [Cabeza de Vaca] in\nQuestion type: movie_to_language\nQuestion: what kind of film is [True Romance]\nQuestion type: movie_to_genre\nQuestion: can you name a film directed by [William Cameron Menzies]\nQuestion type: director_to_movie\nQuestion: who acted in [Terminal Velocity]\nQuestion type: movie_to_actor\nQuestion: who's the director of [True Romance]\nQuestion type: movie_to_director\nQuestion: what does [Sacha Baron Cohen] appear in\nQuestion type: actor_to_movie\n"
 def two_hop_type_generator(question):
@@ -55,7 +60,7 @@ def two_hop_type_generator(question):
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                stop=["Question: "]
+                stop=["Question: "],
             )
             got_result = True
         except:
@@ -89,16 +94,13 @@ def retrieve_answer(found_type, found_ent):
         return []
 
 
-
-
-
-if __name__=="__main__":
+if __name__ == "__main__":
     openai.api_key = ""
     enti_to_fact_dict = {}
-    with open('data/data/metaQA/kb.txt') as f:
+    with open("data/data/metaQA/kb.txt") as f:
         lines = f.readlines()
         for line in lines:
-            s, r, o = line.split('|')
+            s, r, o = line.split("|")
             if s.strip() not in enti_to_fact_dict:
                 enti_to_fact_dict[s.strip()] = [line.strip()]
             else:
@@ -108,7 +110,7 @@ if __name__=="__main__":
             else:
                 enti_to_fact_dict[o.strip()].append(line.strip())
 
-    test_question_2hop = ques_ans_process('data/data/metaQA/qa_test_2hop.txt')
+    test_question_2hop = ques_ans_process("data/data/metaQA/qa_test_2hop.txt")
     # train_question_1hop = ques_ans_process('data/data/metaQA/qa_train_1hop.txt')
     type_to_ques_dict = {}
     # for type, que in zip(train_type_list_1hop, train_question_1hop):
@@ -117,11 +119,19 @@ if __name__=="__main__":
     #     else:
     #         type_to_ques_dict[type] = [que["question"]]
 
-    type_to_rela_dict = {"tag_to_movie": "has_tags", "writer_to_movie": "written_by", "movie_to_tags": "has_tags",
-                         "movie_to_year": "release_year", "movie_to_writer": "written_by", "movie_to_language": "in_language",
-                         "movie_to_genre": "has_genre", "director_to_movie": "directed_by", "movie_to_actor": "starred_actors",
-                         "movie_to_director": "directed_by", "actor_to_movie": "starred_actors"
-                         }
+    type_to_rela_dict = {
+        "tag_to_movie": "has_tags",
+        "writer_to_movie": "written_by",
+        "movie_to_tags": "has_tags",
+        "movie_to_year": "release_year",
+        "movie_to_writer": "written_by",
+        "movie_to_language": "in_language",
+        "movie_to_genre": "has_genre",
+        "director_to_movie": "directed_by",
+        "movie_to_actor": "starred_actors",
+        "movie_to_director": "directed_by",
+        "actor_to_movie": "starred_actors",
+    }
     types_all = list(type_to_rela_dict.keys())
     types_all_spl = [type_.split("_") for type_ in types_all]
     type_drops_all = []
@@ -150,7 +160,7 @@ if __name__=="__main__":
                 question_type = question_type.split(", ")
                 for idx, type_ in enumerate(question_type):
                     if type_ not in type_to_rela_dict:
-                        tokenized_query = re.split('_', type_)
+                        tokenized_query = re.split("_", type_)
                         tokenized_ques = question.split()
                         tokenized_query = tokenized_query + tokenized_ques
                         drops_query = []
@@ -159,7 +169,11 @@ if __name__=="__main__":
                             if len(doc) > 0:
                                 drops_query.append(doc[0].lemma_)
                         drops_query = " ".join(drops_query)
-                        scores = list(bm25_all_relas.transform(drops_query, [i for i in range(11)]))
+                        scores = list(
+                            bm25_all_relas.transform(
+                                drops_query, [i for i in range(11)]
+                            )
+                        )
                         sorted_score_index = list(np.argsort(scores))
                         sorted_score_index.reverse()
                         bound_type = sorted_score_index[0]
@@ -187,11 +201,4 @@ if __name__=="__main__":
         total += 1
         print("total: ", total)
         print("correct: ", correct)
-        print("accuracy: ", correct/total)
-
-
-
-
-
-
-
+        print("accuracy: ", correct / total)

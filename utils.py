@@ -2,7 +2,7 @@ import json
 
 
 def process_file(filename):
-    data = json.load(open(filename, 'r'), strict=False)
+    data = json.load(open(filename, "r"), strict=False)
     selected_data = []
     for example in data:
         sele_dict = {}
@@ -16,7 +16,7 @@ def process_file(filename):
 
 
 def process_file_node(filename):
-    data = json.load(open(filename, 'r'), strict=False)
+    data = json.load(open(filename, "r"), strict=False)
     question_to_mid_dict = {}
     for example in data:
         key = example["question"]
@@ -34,7 +34,7 @@ def process_file_node(filename):
 
 
 def process_file_test(filename):
-    data = json.load(open(filename, 'r'), strict=False)
+    data = json.load(open(filename, "r"), strict=False)
     selected_data = []
     for example in data:
         sele_dict = {}
@@ -43,11 +43,12 @@ def process_file_test(filename):
         selected_data.append(sele_dict)
     return selected_data
 
+
 def process_file_rela(file_path_name, max_index):
     return_dict = {}
     for i in range(max_index):
         filename = file_path_name + str(i)
-        data = json.load(open(filename, 'r'), strict=False)
+        data = json.load(open(filename, "r"), strict=False)
         for key in data:
             if key not in return_dict:
                 return_dict[key] = data[key]

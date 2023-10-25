@@ -8,10 +8,9 @@ The implementation for paper [Few-shot In-context Learning for Knowledge Base Qu
 2. Download GrailQA/WebQSP/GraphQA/MetaQA and other required files from the [link](https://drive.google.com/drive/folders/1g8ZpMLSw95KwjisXEw07rVVC3TJ1LZdn?usp=sharing) and put them under `data/`.
 3. Install all required libraries:
 ```
-$ pip install -r requirements.txt
+$ pip install -r requirements.txt -U
 ```
-You can download the index file and put it under `contriever_fb_relation
-/freebase_contriever_index/` with this [link](https://drive.google.com/file/d/1hnyW-_k0YaAUZDTdYzhbKDTnFuLEW-W2/view?usp=sharing).
+You can download the index file and put it under `contriever_fb_relation/freebase_contriever_index/` with this [link](https://drive.google.com/file/d/1hnyW-_k0YaAUZDTdYzhbKDTnFuLEW-W2/view?usp=sharing).
 
 ## Run Experiments
 

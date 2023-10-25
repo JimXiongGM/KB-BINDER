@@ -1,26 +1,31 @@
-import openai
-import json
-import spacy
-from sparql_exe import execute_query, get_types, get_2hop_relations, lisp_to_sparql
-from utils import process_file, process_file_node, process_file_rela, process_file_test
-from rank_bm25 import BM25Okapi
-from time import sleep
-import re
-import logging
-from collections import Counter
+import os
 import argparse
-from pyserini.search import FaissSearcher, LuceneSearcher
-from pyserini.search.hybrid import HybridSearcher
-from pyserini.search.faiss import AutoQueryEncoder
-import random
 import itertools
+import json
+import logging
+import random
+import re
+from collections import Counter
+from time import sleep
 
+import openai
+import spacy
+from pyserini.search import FaissSearcher, LuceneSearcher
+from pyserini.search.faiss import AutoQueryEncoder
+from pyserini.search.hybrid import HybridSearcher
+from rank_bm25 import BM25Okapi
+
+from sparql_exe import execute_query, get_2hop_relations, get_types, lisp_to_sparql
+from utils import process_file, process_file_node
 
 logging.getLogger().setLevel(logging.INFO)
-logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s',
-                    level=logging.INFO,
-                    datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    level=logging.INFO,
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger("time recoder")
+
 
 def select_shot_prompt_train(train_data_in, shot_number):
     random.shuffle(train_data_in)
@@ -34,38 +39,44 @@ def select_shot_prompt_train(train_data_in, shot_number):
         selected_quest_compare = []
         each_type_num = shot_number // 2
         for data in train_data_in:
-            if any([x in data['s_expression'] for x in compare_list]):
+            if any([x in data["s_expression"] for x in compare_list]):
                 selected_quest_compare.append(data["question"])
                 if len(selected_quest_compare) == each_type_num:
                     break
         for data in train_data_in:
-            if not any([x in data['s_expression'] for x in compare_list]):
+            if not any([x in data["s_expression"] for x in compare_list]):
                 selected_quest_compose.append(data["question"])
                 if len(selected_quest_compose) == each_type_num:
                     break
         mix_type_num = each_type_num // 3
-        selected_quest = selected_quest_compose[:mix_type_num] + selected_quest_compare[:mix_type_num]
+        selected_quest = (
+            selected_quest_compose[:mix_type_num]
+            + selected_quest_compare[:mix_type_num]
+        )
     logger.info("selected_quest_compose: {}".format(selected_quest_compose))
     logger.info("selected_quest_compare: {}".format(selected_quest_compare))
     logger.info("selected_quest: {}".format(selected_quest))
     return selected_quest_compose, selected_quest_compare, selected_quest
+
 
 def sub_mid_to_fn(question, string, question_to_mid_dict):
     seg_list = string.split()
     mid_to_start_idx_dict = {}
     for seg in seg_list:
         if seg.startswith("m.") or seg.startswith("g."):
-            mid = seg.strip(')(')
+            mid = seg.strip(")(")
             start_index = string.index(mid)
             mid_to_start_idx_dict[mid] = start_index
     if len(mid_to_start_idx_dict) == 0:
         return string
     start_index = 0
-    new_string = ''
+    new_string = ""
     for key in mid_to_start_idx_dict:
         b_idx = mid_to_start_idx_dict[key]
         e_idx = b_idx + len(key)
-        new_string = new_string + string[start_index:b_idx] + question_to_mid_dict[question][key]
+        new_string = (
+            new_string + string[start_index:b_idx] + question_to_mid_dict[question][key]
+        )
         start_index = e_idx
     new_string = new_string + string[start_index:]
     return new_string
@@ -87,7 +98,7 @@ def type_generator(question, prompt_type, api_key, LLM_engine):
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                stop=["Question: "]
+                stop=["Question: "],
             )
             got_result = True
         except:
@@ -96,8 +107,20 @@ def type_generator(question, prompt_type, api_key, LLM_engine):
     return gene_exp
 
 
-def ep_generator(question, selected_examples, temp, que_to_s_dict_train, question_to_mid_dict, api_key, LLM_engine,
-                 retrieval=False, corpus=None, nlp_model=None, bm25_train_full=None, retrieve_number=100):
+def ep_generator(
+    question,
+    selected_examples,
+    temp,
+    que_to_s_dict_train,
+    question_to_mid_dict,
+    api_key,
+    LLM_engine,
+    retrieval=False,
+    corpus=None,
+    nlp_model=None,
+    bm25_train_full=None,
+    retrieve_number=100,
+):
     if retrieval:
         tokenized_query = nlp_model(question)
         tokenized_query = [token.lemma_ for token in tokenized_query]
@@ -111,7 +134,15 @@ def ep_generator(question, selected_examples, temp, que_to_s_dict_train, questio
     for que in selected_examples:
         if not que_to_s_dict_train[que]:
             continue
-        prompt = prompt + "Question: " + que + "\n" + "Logical Form: " + sub_mid_to_fn(que, que_to_s_dict_train[que], question_to_mid_dict) + "\n"
+        prompt = (
+            prompt
+            + "Question: "
+            + que
+            + "\n"
+            + "Logical Form: "
+            + sub_mid_to_fn(que, que_to_s_dict_train[que], question_to_mid_dict)
+            + "\n"
+        )
     prompt = prompt + "Question: " + question + "\n" + "Logical Form: "
     got_result = False
     while got_result != True:
@@ -126,7 +157,7 @@ def ep_generator(question, selected_examples, temp, que_to_s_dict_train, questio
                 frequency_penalty=0,
                 presence_penalty=0,
                 stop=["Question: "],
-                n=7
+                n=7,
             )
             got_result = True
         except:
@@ -136,7 +167,20 @@ def ep_generator(question, selected_examples, temp, que_to_s_dict_train, questio
 
 
 def convert_to_frame(s_exp):
-    phrase_set = ["(JOIN", "(ARGMIN", "(ARGMAX", "(R", "(le", "(lt", "(ge", "(gt", "(COUNT", "(AND", "(TC", "(CONS"]
+    phrase_set = [
+        "(JOIN",
+        "(ARGMIN",
+        "(ARGMAX",
+        "(R",
+        "(le",
+        "(lt",
+        "(ge",
+        "(gt",
+        "(COUNT",
+        "(AND",
+        "(TC",
+        "(CONS",
+    ]
     seg_list = s_exp.split()
     after_filter_list = []
     for seg in seg_list:
@@ -144,22 +188,33 @@ def convert_to_frame(s_exp):
             if phrase in seg:
                 after_filter_list.append(phrase)
         if ")" in seg:
-            after_filter_list.append(''.join(i for i in seg if i == ')'))
-    return ''.join(after_filter_list)
+            after_filter_list.append("".join(i for i in seg if i == ")"))
+    return "".join(after_filter_list)
 
 
 def find_friend_name(gene_exp, org_question):
     seg_list = gene_exp.split()
-    phrase_set = ["(JOIN", "(ARGMIN", "(ARGMAX", "(R", "(le", "(lt", "(ge", "(gt", "(COUNT", "(AND"]
+    phrase_set = [
+        "(JOIN",
+        "(ARGMIN",
+        "(ARGMAX",
+        "(R",
+        "(le",
+        "(lt",
+        "(ge",
+        "(gt",
+        "(COUNT",
+        "(AND",
+    ]
     temp = []
     reg_ents = []
     for i, seg in enumerate(seg_list):
         if not any([ph in seg for ph in phrase_set]):
             if seg.lower() in org_question:
                 temp.append(seg.lower())
-            if seg.endswith(')'):
-                stripped = seg.strip(')')
-                stripped_add = stripped + ')'
+            if seg.endswith(")"):
+                stripped = seg.strip(")")
+                stripped_add = stripped + ")"
                 if stripped_add.lower() in org_question:
                     temp.append(stripped_add.lower())
                     reg_ents.append(" ".join(temp).lower())
@@ -171,6 +226,7 @@ def find_friend_name(gene_exp, org_question):
     if len(temp) != 0:
         reg_ents.append(" ".join(temp))
     return reg_ents
+
 
 def get_right_mid_set(fn, id_dict, question):
     type_to_mid_dict = {}
@@ -185,7 +241,7 @@ def get_right_mid_set(fn, id_dict, question):
                 else:
                     type_to_mid_dict[cur_type][mid] = id_dict[mid]
                 type_list.append(cur_type)
-    tokenized_type_list = [re.split('\.|_', doc) for doc in type_list]
+    tokenized_type_list = [re.split("\.|_", doc) for doc in type_list]
     #     tokenized_question = tokenizer.tokenize(question)
     tokenized_question = question.split()
     bm25 = BM25Okapi(tokenized_type_list)
@@ -198,11 +254,12 @@ def get_right_mid_set(fn, id_dict, question):
         selected_mids += list(type_to_mid_dict[any_type].keys())
     return selected_mids
 
+
 def from_fn_to_id_set(fn_list, question, name_to_id_dict, bm25_all_fns, all_fns):
     return_mid_list = []
     for fn_org in fn_list:
         drop_dot = fn_org.split()
-        drop_dot = [seg.strip('.') for seg in drop_dot]
+        drop_dot = [seg.strip(".") for seg in drop_dot]
         drop_dot = " ".join(drop_dot)
         if fn_org.lower() not in question and drop_dot.lower() in question:
             fn_org = drop_dot
@@ -224,12 +281,11 @@ def from_fn_to_id_set(fn_list, question, name_to_id_dict, bm25_all_fns, all_fns)
     return return_mid_list
 
 
-
 def convz_fn_to_mids(gene_exp, found_names, found_mids):
     if len(found_names) == 0:
         return gene_exp
     start_index = 0
-    new_string = ''
+    new_string = ""
     for name, mid in zip(found_names, found_mids):
         b_idx = gene_exp.lower().index(name)
         e_idx = b_idx + len(name)
@@ -237,6 +293,7 @@ def convz_fn_to_mids(gene_exp, found_names, found_mids):
         start_index = e_idx
     new_string = new_string + gene_exp[start_index:]
     return new_string
+
 
 def add_reverse(org_exp):
     final_candi = [org_exp]
@@ -275,8 +332,16 @@ def add_reverse_index(list_of_e, join_id):
     return added_list
 
 
-def bound_to_existed(question, s_expression, found_mids, two_hop_rela_dict,
-                     relationship_to_enti, hsearcher, rela_corpus, relationships):
+def bound_to_existed(
+    question,
+    s_expression,
+    found_mids,
+    two_hop_rela_dict,
+    relationship_to_enti,
+    hsearcher,
+    rela_corpus,
+    relationships,
+):
     possible_relationships_can = []
     possible_relationships = []
     # logger.info("before 2 hop rela")
@@ -293,7 +358,11 @@ def bound_to_existed(question, s_expression, found_mids, two_hop_rela_dict,
             possible_relationships_can += list(set(relas[1]))
     # logger.info("after 2 hop rela")
     for rela in possible_relationships_can:
-        if not rela.startswith('common') and not rela.startswith('base') and not rela.startswith('type'):
+        if (
+            not rela.startswith("common")
+            and not rela.startswith("base")
+            and not rela.startswith("type")
+        ):
             possible_relationships.append(rela)
     if not possible_relationships:
         possible_relationships = relationships.copy()
@@ -303,25 +372,37 @@ def bound_to_existed(question, s_expression, found_mids, two_hop_rela_dict,
     relationship_replace_dict = {}
     lemma_tags = {"NNS", "NNPS"}
     for i, seg in enumerate(expression_segment):
-        processed_seg = seg.strip(')')
-        if '.' in seg and not seg.startswith('m.') and not seg.startswith('g.') and not (
-                expression_segment[i - 1].endswith("AND") or expression_segment[i - 1].endswith("COUNT") or
-                expression_segment[i - 1].endswith("MAX") or expression_segment[i - 1].endswith("MIN")) and (
-                not any(ele.isupper() for ele in seg)):
-            tokenized_query = re.split('\.|_', processed_seg)
+        processed_seg = seg.strip(")")
+        if (
+            "." in seg
+            and not seg.startswith("m.")
+            and not seg.startswith("g.")
+            and not (
+                expression_segment[i - 1].endswith("AND")
+                or expression_segment[i - 1].endswith("COUNT")
+                or expression_segment[i - 1].endswith("MAX")
+                or expression_segment[i - 1].endswith("MIN")
+            )
+            and (not any(ele.isupper() for ele in seg))
+        ):
+            tokenized_query = re.split("\.|_", processed_seg)
             tokenized_query = " ".join(tokenized_query)
-            tokenized_question = question.strip(' ?')
-            tokenized_query = tokenized_query + ' ' + tokenized_question
+            tokenized_question = question.strip(" ?")
+            tokenized_query = tokenized_query + " " + tokenized_question
             searched_results = hsearcher.search(tokenized_query, k=1000)
             top3_ques = []
             for hit in searched_results:
                 if len(top3_ques) > 7:
                     break
                 cur_result = json.loads(rela_corpus.doc(str(hit.docid)).raw())
-                cur_rela = cur_result['rel_ori']
-                if not cur_rela.startswith("base.") and not cur_rela.startswith("common.") and \
-                        not cur_rela.endswith("_inv.") and len(cur_rela.split('.')) > 2 and \
-                        cur_rela in possible_relationships:
+                cur_rela = cur_result["rel_ori"]
+                if (
+                    not cur_rela.startswith("base.")
+                    and not cur_rela.startswith("common.")
+                    and not cur_rela.endswith("_inv.")
+                    and len(cur_rela.split(".")) > 2
+                    and cur_rela in possible_relationships
+                ):
                     top3_ques.append(cur_rela)
             logger.info("top3_ques rela: {}".format(top3_ques))
             relationship_replace_dict[i] = top3_ques[:7]
@@ -339,8 +420,8 @@ def bound_to_existed(question, s_expression, found_mids, two_hop_rela_dict,
         possible_entities_set = []
         for i in range(len(iters)):
             suffix = ""
-            for k in range(len(expression_segment[rela_index[i]].split(')')) - 1):
-                suffix = suffix + ')'
+            for k in range(len(expression_segment[rela_index[i]].split(")")) - 1):
+                suffix = suffix + ")"
             expression_segment_copy[rela_index[i]] = iters[i] + suffix
             if iters[i] in relationship_to_enti:
                 possible_entities_set += relationship_to_enti[iters[i]]
@@ -348,13 +429,23 @@ def bound_to_existed(question, s_expression, found_mids, two_hop_rela_dict,
             continue
         enti_replace_dict = {}
         for j, seg in enumerate(expression_segment):
-            processed_seg = seg.strip(')')
-            if '.' in seg and not seg.startswith('m.') and not seg.startswith('g.') and (
-                    expression_segment[j - 1].endswith("AND") or expression_segment[j - 1].endswith("COUNT") or
-                    expression_segment[j - 1].endswith("MAX") or expression_segment[j - 1].endswith("MIN")) and (
-            not any(ele.isupper() for ele in seg)):
-                tokenized_enti = [re.split('\.|_', doc) for doc in possible_entities_set]
-                tokenized_query = re.split('\.|_', processed_seg)
+            processed_seg = seg.strip(")")
+            if (
+                "." in seg
+                and not seg.startswith("m.")
+                and not seg.startswith("g.")
+                and (
+                    expression_segment[j - 1].endswith("AND")
+                    or expression_segment[j - 1].endswith("COUNT")
+                    or expression_segment[j - 1].endswith("MAX")
+                    or expression_segment[j - 1].endswith("MIN")
+                )
+                and (not any(ele.isupper() for ele in seg))
+            ):
+                tokenized_enti = [
+                    re.split("\.|_", doc) for doc in possible_entities_set
+                ]
+                tokenized_query = re.split("\.|_", processed_seg)
                 bm25 = BM25Okapi(tokenized_enti)
                 top3_ques = bm25.get_top_n(tokenized_query, possible_entities_set, n=3)
                 enti_replace_dict[j] = list(set(top3_ques))
@@ -364,8 +455,8 @@ def bound_to_existed(question, s_expression, found_mids, two_hop_rela_dict,
         for iter_ent in all_iters_enti:
             for k in range(len(iter_ent)):
                 suffix = ""
-                for h in range(len(expression_segment[enti_index[k]].split(')')) - 1):
-                    suffix = suffix + ')'
+                for h in range(len(expression_segment[enti_index[k]].split(")")) - 1):
+                    suffix = suffix + ")"
                 expression_segment_copy[enti_index[k]] = iter_ent[k] + suffix
             final = " ".join(expression_segment_copy)
             added = add_reverse(final)
@@ -391,7 +482,7 @@ def generate_answer(list_exp):
             continue
         if re:
             if re[0].isnumeric():
-                if re[0] == '0':
+                if re[0] == "0":
                     continue
                 else:
                     return re
@@ -410,17 +501,37 @@ def number_of_join(exp):
 
 
 def process_file_codex_output(filename_before, filename_after):
-    codex_eps_dict_before = json.load(open(filename_before, 'r'), strict=False)
-    codex_eps_dict_after = json.load(open(filename_after, 'r'), strict=False)
+    codex_eps_dict_before = json.load(open(filename_before, "r"), strict=False)
+    codex_eps_dict_after = json.load(open(filename_after, "r"), strict=False)
     for key in codex_eps_dict_after:
         codex_eps_dict_before[key] = codex_eps_dict_after[key]
     return codex_eps_dict_before
 
-def all_combiner_evaluation(data_batch, selected_quest_compare, selected_quest_compose, selected_quest,
-                            prompt_type, hsearcher, rela_corpus, relationships, temp, que_to_s_dict_train,
-                            question_to_mid_dict, api_key, LLM_engine, name_to_id_dict, bm25_all_fns, all_fns,
-                            relationship_to_enti, retrieval=False, corpus=None, nlp_model=None, bm25_train_full=None,
-                            retrieve_number=100):
+
+def all_combiner_evaluation(
+    data_batch,
+    selected_quest_compare,
+    selected_quest_compose,
+    selected_quest,
+    prompt_type,
+    hsearcher,
+    rela_corpus,
+    relationships,
+    temp,
+    que_to_s_dict_train,
+    question_to_mid_dict,
+    api_key,
+    LLM_engine,
+    name_to_id_dict,
+    bm25_all_fns,
+    all_fns,
+    relationship_to_enti,
+    retrieval=False,
+    corpus=None,
+    nlp_model=None,
+    bm25_train_full=None,
+    retrieve_number=100,
+):
     correct = [0] * 6
     total = [0] * 6
     no_ans = [0] * 6
@@ -433,23 +544,43 @@ def all_combiner_evaluation(data_batch, selected_quest_compare, selected_quest_c
         for ans in data["answer"]:
             label.append(ans["answer_argument"])
         if not retrieval:
-            gene_type = type_generator(data["question"], prompt_type, api_key, LLM_engine)
+            gene_type = type_generator(
+                data["question"], prompt_type, api_key, LLM_engine
+            )
             logger.info("gene_type: {}".format(gene_type))
         else:
             gene_type = None
 
         if gene_type == "Comparison":
-            gene_exps = ep_generator(data["question"],
-                                     list(set(selected_quest_compare) | set(selected_quest)),
-                                     temp, que_to_s_dict_train, question_to_mid_dict, api_key, LLM_engine,
-                                     retrieval=retrieval, corpus=corpus, nlp_model=nlp_model,
-                                     bm25_train_full=bm25_train_full, retrieve_number=retrieve_number)
+            gene_exps = ep_generator(
+                data["question"],
+                list(set(selected_quest_compare) | set(selected_quest)),
+                temp,
+                que_to_s_dict_train,
+                question_to_mid_dict,
+                api_key,
+                LLM_engine,
+                retrieval=retrieval,
+                corpus=corpus,
+                nlp_model=nlp_model,
+                bm25_train_full=bm25_train_full,
+                retrieve_number=retrieve_number,
+            )
         else:
-            gene_exps = ep_generator(data["question"],
-                                     list(set(selected_quest_compose) | set(selected_quest)),
-                                     temp, que_to_s_dict_train, question_to_mid_dict, api_key, LLM_engine,
-                                     retrieval=retrieval, corpus=corpus, nlp_model=nlp_model,
-                                     bm25_train_full=bm25_train_full, retrieve_number=retrieve_number)
+            gene_exps = ep_generator(
+                data["question"],
+                list(set(selected_quest_compose) | set(selected_quest)),
+                temp,
+                que_to_s_dict_train,
+                question_to_mid_dict,
+                api_key,
+                LLM_engine,
+                retrieval=retrieval,
+                corpus=corpus,
+                nlp_model=nlp_model,
+                bm25_train_full=bm25_train_full,
+                retrieve_number=retrieve_number,
+            )
         two_hop_rela_dict = {}
         answer_candi = []
         removed_none_candi = []
@@ -467,7 +598,13 @@ def all_combiner_evaluation(data_batch, selected_quest_compare, selected_quest_c
                 else:
                     top_mid = 15
                 found_names = find_friend_name(gene_exp, data["question"])
-                found_mids = from_fn_to_id_set(found_names, data["question"], name_to_id_dict, bm25_all_fns, all_fns)
+                found_mids = from_fn_to_id_set(
+                    found_names,
+                    data["question"],
+                    name_to_id_dict,
+                    bm25_all_fns,
+                    all_fns,
+                )
                 found_mids = [mids[:top_mid] for mids in found_mids]
                 mid_combinations = list(itertools.product(*found_mids))
                 logger.info("all_iters: {}".format(mid_combinations))
@@ -475,9 +612,16 @@ def all_combiner_evaluation(data_batch, selected_quest_compare, selected_quest_c
                     logger.info("mid_iters: {}".format(mid_iters))
                     replaced_exp = convz_fn_to_mids(gene_exp, found_names, mid_iters)
 
-                    answer, two_hop_rela_dict, bounded_exp = bound_to_existed(data["question"], replaced_exp, mid_iters,
-                                                                              two_hop_rela_dict, relationship_to_enti,
-                                                                              hsearcher, rela_corpus, relationships)
+                    answer, two_hop_rela_dict, bounded_exp = bound_to_existed(
+                        data["question"],
+                        replaced_exp,
+                        mid_iters,
+                        two_hop_rela_dict,
+                        relationship_to_enti,
+                        hsearcher,
+                        rela_corpus,
+                        relationships,
+                    )
                     answer_candi.append(answer)
                     if answer is not None:
                         answer_to_grounded_dict[tuple(answer)] = bounded_exp
@@ -506,56 +650,115 @@ def all_combiner_evaluation(data_batch, selected_quest_compare, selected_quest_c
                 correct[idx] += 1
             total[idx] += 1
             em_score = correct[idx] / total[idx]
-            logger.info("================================================================")
-            logger.info("consistent candidates number: {}".format(idx+1))
+            logger.info(
+                "================================================================"
+            )
+            logger.info("consistent candidates number: {}".format(idx + 1))
             logger.info("em_score: {}".format(em_score))
             logger.info("correct: {}".format(correct[idx]))
             logger.info("total: {}".format(total[idx]))
             logger.info("no_ans: {}".format(no_ans[idx]))
             logger.info(" ")
-            logger.info("================================================================")
-
-
+            logger.info(
+                "================================================================"
+            )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(allow_abbrev=False)
 
-    parser.add_argument('--shot_num', type=int, metavar='N',
-                        default=40, help='the number of shots used in in-context demo')
-    parser.add_argument('--temperature', type=float, metavar='N',
-                        default=0.3, help='the temperature of LLM')
-    parser.add_argument('--api_key', type=str, metavar='N',
-                        default=None, help='the api key to access LLM')
-    parser.add_argument('--engine', type=str, metavar='N',
-                        default="code-davinci-002", help='engine name of LLM')
-    parser.add_argument('--retrieval', action='store_true', help='whether to use retrieval-augmented KB-BINDER')
-    parser.add_argument('--train_data_path', type=str, metavar='N',
-                        default="data/GrailQA/grailqa_v1.0_train.json", help='training data path')
-    parser.add_argument('--eva_data_path', type=str, metavar='N',
-                        default="data/GrailQA/grailqa_v1.0_dev.json", help='evaluation data path')
-    parser.add_argument('--fb_roles_path', type=str, metavar='N',
-                        default="data/GrailQA/fb_roles", help='freebase roles file path')
-    parser.add_argument('--surface_map_path', type=str, metavar='N',
-                        default="data/surface_map_file_freebase_complete_all_mention", help='surface map file path')
+    parser.add_argument(
+        "--shot_num",
+        type=int,
+        metavar="N",
+        default=40,
+        help="the number of shots used in in-context demo",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        metavar="N",
+        default=0.3,
+        help="the temperature of LLM",
+    )
+    parser.add_argument(
+        "--api_key",
+        type=str,
+        metavar="N",
+        default=None,
+        help="the api key to access LLM",
+    )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        metavar="N",
+        default="code-davinci-002",
+        help="engine name of LLM",
+    )
+    parser.add_argument(
+        "--retrieval",
+        action="store_true",
+        help="whether to use retrieval-augmented KB-BINDER",
+    )
+    parser.add_argument(
+        "--train_data_path",
+        type=str,
+        metavar="N",
+        default="data/GrailQA/grailqa_v1.0_train.json",
+        help="training data path",
+    )
+    parser.add_argument(
+        "--eva_data_path",
+        type=str,
+        metavar="N",
+        default="data/GrailQA/grailqa_v1.0_dev.json",
+        help="evaluation data path",
+    )
+    parser.add_argument(
+        "--fb_roles_path",
+        type=str,
+        metavar="N",
+        default="data/GrailQA/fb_roles",
+        help="freebase roles file path",
+    )
+    parser.add_argument(
+        "--surface_map_path",
+        type=str,
+        metavar="N",
+        default="data/surface_map_file_freebase_complete_all_mention",
+        help="surface map file path",
+    )
 
     args = parser.parse_args()
+    args.api_key = os.environ["OPENAI_API_KEY"]
     return args
+
 
 def main():
     args = parse_args()
     nlp = spacy.load("en_core_web_sm")
-    bm25_searcher = LuceneSearcher('contriever_fb_relation/index_relation_fb')
-    query_encoder = AutoQueryEncoder(encoder_dir='facebook/contriever', pooling='mean')
-    contriever_searcher = FaissSearcher('contriever_fb_relation/freebase_contriever_index', query_encoder)
+    bm25_searcher = LuceneSearcher("contriever_fb_relation/index_relation_fb")
+    query_encoder = AutoQueryEncoder(encoder_dir="PLMs/facebook/contriever", pooling="mean")
+    contriever_searcher = FaissSearcher(
+        "contriever_fb_relation/freebase_contriever_index", query_encoder
+    )
     hsearcher = HybridSearcher(contriever_searcher, bm25_searcher)
-    rela_corpus = LuceneSearcher('contriever_fb_relation/index_relation_fb')
+    
+    # rela_corpus 和 bm25_searcher 一样 ？？？
+    rela_corpus = LuceneSearcher("contriever_fb_relation/index_relation_fb")
+    
     dev_data = process_file(args.eva_data_path)
     train_data = process_file(args.train_data_path)
-    que_to_s_dict_train = {data["question"]: data["s_expression"] for data in train_data}
+    que_to_s_dict_train = {
+        data["question"]: data["s_expression"] for data in train_data
+    }
     question_to_mid_dict = process_file_node(args.train_data_path)
     if not args.retrieval:
-        selected_quest_compose, selected_quest_compare, selected_quest = select_shot_prompt_train(train_data, args.shot_num)
+        (
+            selected_quest_compose,
+            selected_quest_compare,
+            selected_quest,
+        ) = select_shot_prompt_train(train_data, args.shot_num)
     else:
         selected_quest_compose = []
         selected_quest_compare = []
@@ -568,7 +771,7 @@ def main():
         tokenized_train_data.append([token.lemma_ for token in nlp_doc])
     bm25_train_full = BM25Okapi(tokenized_train_data)
     if not args.retrieval:
-        prompt_type = ''
+        prompt_type = ""
         random.shuffle(all_ques)
         for que in all_ques:
             prompt_type = prompt_type + "Question: " + que + "\nType of the question: "
@@ -577,7 +780,7 @@ def main():
             else:
                 prompt_type += "Comparison\n"
     else:
-        prompt_type = ''
+        prompt_type = ""
     with open(args.fb_roles_path) as f:
         lines = f.readlines()
     relationships = []
@@ -606,11 +809,31 @@ def main():
     all_fns = list(name_to_id_dict.keys())
     tokenized_all_fns = [fn.split() for fn in all_fns]
     bm25_all_fns = BM25Okapi(tokenized_all_fns)
-    all_combiner_evaluation(dev_data, selected_quest_compose, selected_quest_compare, selected_quest, prompt_type,
-                            hsearcher, rela_corpus, relationships, args.temperature, que_to_s_dict_train,
-                            question_to_mid_dict, args.api_key, args.engine, name_to_id_dict, bm25_all_fns,
-                            all_fns, relationship_to_enti, retrieval=args.retrieval, corpus=corpus, nlp_model=nlp,
-                            bm25_train_full=bm25_train_full, retrieve_number=args.shot_num)
+    all_combiner_evaluation(
+        dev_data,
+        selected_quest_compose,
+        selected_quest_compare,
+        selected_quest,
+        prompt_type,
+        hsearcher,
+        rela_corpus,
+        relationships,
+        args.temperature,
+        que_to_s_dict_train,
+        question_to_mid_dict,
+        args.api_key,
+        args.engine,
+        name_to_id_dict,
+        bm25_all_fns,
+        all_fns,
+        relationship_to_enti,
+        retrieval=args.retrieval,
+        corpus=corpus,
+        nlp_model=nlp,
+        bm25_train_full=bm25_train_full,
+        retrieve_number=args.shot_num,
+    )
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
