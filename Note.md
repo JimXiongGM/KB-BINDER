@@ -26,7 +26,7 @@ python few_shot_kbqa.py --shot_num 4 --temperature 0.3 \
 
 ```bash
 
-export OPENAI_API_KEY=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
+export OPENAI_API_KEY=sk-123
 export JAVA_HOME=/home/${USER}/opt/jdk-17.0.9
 python few_shot_kbqa.py --shot_num 4 --temperature 0.3 \
     --engine gpt-4-1106-preview \
@@ -35,7 +35,7 @@ python few_shot_kbqa.py --shot_num 4 --temperature 0.3 \
     --train_data_path smalldata/WebQSP_train.json \
     --eva_data_path smalldata/WebQSP_test.json
 
-export OPENAI_API_KEY=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
+export OPENAI_API_KEY=sk-123
 export JAVA_HOME=/home/${USER}/opt/jdk-17.0.9
 python few_shot_kbqa.py --shot_num 4 --temperature 0.3 --retrieval \
     --engine gpt-4-1106-preview \
@@ -45,7 +45,7 @@ python few_shot_kbqa.py --shot_num 4 --temperature 0.3 --retrieval \
     --eva_data_path smalldata/WebQSP_test.json
 
 # metaqa
-export OPENAI_API_KEY=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
+export OPENAI_API_KEY=sk-123
 python metaqa_src/metaqa_1hop.py &
 python metaqa_src/metaqa_2hop.py &
 python metaqa_src/metaqa_3hop.py &
