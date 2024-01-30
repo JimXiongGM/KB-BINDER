@@ -1,8 +1,6 @@
 import json
-import random
 from time import sleep
-
-import openai
+import os
 import spacy
 
 nlp = spacy.load("en_core_web_sm")
@@ -12,6 +10,7 @@ import numpy as np
 from bm25_trial import BM25_self
 from rank_bm25 import BM25Okapi
 
+from metaqa_1hop import client, LLM_engine
 
 def type_process(file_name):
     test_type_list = []
@@ -73,12 +72,16 @@ def type_generator(question):
                 + "\n"
             )
     prompt = prompt + " Question: " + question + "\nQuestion type: "
-    got_result = False
-    while got_result != True:
+
+    messages = [
+        {"role": "system", "content": "You are an AI assistant."},
+        {"role": "user", "content": prompt},
+    ]
+    while 1:
         try:
-            answer_modi = openai.Completion.create(
-                engine="code-davinci-002",
-                prompt=prompt,
+            response = client.chat.completions.create(
+                model=LLM_engine,
+                messages=messages,
                 temperature=0,
                 max_tokens=256,
                 top_p=1,
@@ -86,17 +89,17 @@ def type_generator(question):
                 presence_penalty=0,
                 stop=["Question: "],
             )
-            got_result = True
-        except:
+            response = json.loads(response.json())
+            gene_type = response["choices"][0]["message"]["content"].strip()
+            return gene_type, response["usage"]
+        except Exception as e:
+            print("error in type generation", e)
             sleep(3)
-    gene_exp = answer_modi["choices"][0]["text"].strip()
-    return gene_exp
 
 
 if __name__ == "__main__":
-    api_key = ""  # need to be specified
     enti_to_fact_dict = {}
-    with open("data/data/metaQA/kb.txt") as f:
+    with open("data/metaQA/kb.txt") as f:
         lines = f.readlines()
         for line in lines:
             s, r, o = line.split("|")
@@ -109,11 +112,11 @@ if __name__ == "__main__":
             else:
                 enti_to_fact_dict[o.strip()].append(line.strip())
 
-    test_type_list_1hop = type_process("data/data/metaQA/qa_test_qtype_1hop.txt")
-    train_type_list_1hop = type_process("data/data/metaQA/qa_train_qtype_1hop.txt")
+    test_type_list_1hop = type_process("data/metaQA/qa_test_qtype_1hop.txt")
+    train_type_list_1hop = type_process("data/metaQA/qa_train_qtype_1hop.txt")
 
-    test_question_1hop = ques_ans_process("data/data/metaQA/qa_test_1hop.txt")
-    train_question_1hop = ques_ans_process("data/data/metaQA/qa_train_1hop.txt")
+    test_question_1hop = ques_ans_process("data/metaQA/qa_test_1hop.txt")
+    train_question_1hop = ques_ans_process("data/metaQA/qa_train_1hop.txt")
     type_to_ques_dict = {}
     train_ques_to_type_dict = {}
     for type, que in zip(train_type_list_1hop, train_question_1hop):
@@ -122,6 +125,19 @@ if __name__ == "__main__":
             type_to_ques_dict[type].append(que["question"])
         else:
             type_to_ques_dict[type] = [que["question"]]
+
+    # small data
+    test_data = json.load(open("../LLM_KGQA/data/metaqa/test/1-hop.json"))
+    valid_questions_map = {d["question"]:d["id"] for d in test_data}
+    for d in test_question_1hop:
+        d["question"] = d["question"].replace("[", "").replace("]", "")
+    new_test_question_1hop = []
+    for d in test_question_1hop:
+        if d["question"] in valid_questions_map:
+            d["id"] = valid_questions_map[d["question"]]
+            new_test_question_1hop.append(d)
+    assert len(new_test_question_1hop) == 300
+    test_question_1hop = new_test_question_1hop
 
     type_to_rela_dict = {
         "tag_to_movie": "has_tags",
@@ -151,22 +167,27 @@ if __name__ == "__main__":
     bm25_all_relas = BM25_self()
     bm25_all_relas.fit(type_drops_all)
 
-    corpus = [data["question"] for data in train_question_1hop]
+    corpus = [data["question"].replace("[","").replace("]","") for data in train_question_1hop]
     tokenized_train_data = []
     for doc in corpus:
         tokenized_train_data.append(doc.split())
     bm25_train_full = BM25Okapi(tokenized_train_data)
 
-    prompt_type = "Given the following types: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: what movies are about [ginger rogers] \nQuestion type: tag_to_movie\nQuestion: what movies was [Erik Matti] the writer of\nQuestion type: writer_to_movie\nQuestion: what topics is [Bad Timing] about\nQuestion type: movie_to_tags\nQuestion: [True Romance], when was it released\nQuestion type: movie_to_year\nQuestion: who wrote the screenplay for [True Romance]\nQuestion type: movie_to_writer\nQuestion: what language is [Cabeza de Vaca] in\nQuestion type: movie_to_language\nQuestion: what kind of film is [True Romance]\nQuestion type: movie_to_genre\nQuestion: can you name a film directed by [William Cameron Menzies]\nQuestion type: director_to_movie\nQuestion: who acted in [Terminal Velocity]\nQuestion type: movie_to_actor\nQuestion: who's the director of [True Romance]\nQuestion type: movie_to_director\nQuestion: what does [Sacha Baron Cohen] appear in\nQuestion type: actor_to_movie\n"
+    prompt_type = "Given the following types: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: what movies are about [ginger rogers] \nQuestion type: tag_to_movie\nQuestion: what movies was [Erik Matti] the writer of\nQuestion type: writer_to_movie\nQuestion: what topics is [Bad Timing] about\nQuestion type: movie_to_tags\nQuestion: [True Romance], when was it released\nQuestion type: movie_to_year\nQuestion: who wrote the screenplay for [True Romance]\nQuestion type: movie_to_writer\nQuestion: what language is [Cabeza de Vaca] in\nQuestion type: movie_to_language\nQuestion: what kind of film is [True Romance]\nQuestion type: movie_to_genre\nQuestion: can you name a film directed by [William Cameron Menzies]\nQuestion type: director_to_movie\nQuestion: who acted in [Terminal Velocity]\nQuestion type: movie_to_actor\nQuestion: who's the director of [True Romance]\nQuestion type: movie_to_director\nQuestion: what does [Sacha Baron Cohen] appear in\nQuestion type: actor_to_movie\n".replace("[","").replace("]","")
     prompt_type_r = "Given the following types: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\n"
 
     total = 0
     correct = 0
-    for ques_dict in test_question_1hop:
-        print("total: ", total)
-        question = ques_dict["question"]
+
+    out = f"save/metaqa/1-hop/KB-BINDER-R-{LLM_engine}"
+    os.makedirs(out, exist_ok=True)
+
+    for item in test_question_1hop:
+        if os.path.exists(f"{out}/{item['id']}.json"):
+            continue   
+        question = item["question"]
         print("question: ", question)
-        question_type = type_generator(question)
+        question_type, usage = type_generator(question)
         print("question_type: ", question_type)
         if question_type not in type_to_rela_dict:
             tokenized_query = re.split("_", question_type)
@@ -185,7 +206,7 @@ if __name__ == "__main__":
             question_type = types_all[bound_type]
         relas = type_to_rela_dict[question_type]
         print("relas: ", relas)
-        ent = ques_dict["retrieved_ent"]
+        ent = item["retrieved_ent"]
         found_relas = enti_to_fact_dict[ent]
         print("found_relas: ", found_relas)
         rela_to_ans_dict = {}
@@ -202,13 +223,17 @@ if __name__ == "__main__":
                 else:
                     rela_to_ans_dict[r] = [s]
         print("rela_to_ans_dict: ", rela_to_ans_dict)
-        print("answer: ", ques_dict["answer"])
+        print("answer: ", item["answer"])
         if relas in rela_to_ans_dict:
             pred = rela_to_ans_dict[relas]
         else:
             pred = []
         print("pred: ", pred)
-        if set(pred) == set(ques_dict["answer"]):
+        if set(pred) == set(item["answer"]):
             correct += 1
         total += 1
         print("accuracy: ", correct / total)
+
+        # save
+        item["prediction"] = pred
+        json.dump(item, open(f"{out}/{item['id']}.json", "w"), indent=4, ensure_ascii=False)

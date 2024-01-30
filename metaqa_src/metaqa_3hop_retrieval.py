@@ -1,16 +1,16 @@
 import json
 from time import sleep
 
-import openai
+import os
+from tqdm import tqdm
+
 import spacy
 
 nlp = spacy.load("en_core_web_sm")
-import random
-import re
 
-import numpy as np
-from bm25_trial import BM25_self
 from rank_bm25 import BM25Okapi
+
+from metaqa_1hop import client, LLM_engine
 
 type_to_rela_dict = {
     "tag_to_movie": "has_tags",
@@ -70,8 +70,6 @@ def convert_que_to_logical_form(question):
     return logical_form, rela_1, rela_2, rela_3
 
 
-# prompt_type = "Given the following types: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: what movies are about [ginger rogers] \nQuestion type: tag_to_movie\nQuestion: what movies was [Erik Matti] the writer of\nQuestion type: writer_to_movie\nQuestion: what topics is [Bad Timing] about\nQuestion type: movie_to_tags\nQuestion: [True Romance], when was it released\nQuestion type: movie_to_year\nQuestion: who wrote the screenplay for [True Romance]\nQuestion type: movie_to_writer\nQuestion: what language is [Cabeza de Vaca] in\nQuestion type: movie_to_language\nQuestion: what kind of film is [True Romance]\nQuestion type: movie_to_genre\nQuestion: can you name a film directed by [William Cameron Menzies]\nQuestion type: director_to_movie\nQuestion: who acted in [Terminal Velocity]\nQuestion type: movie_to_actor\nQuestion: who's the director of [True Romance]\nQuestion type: movie_to_director\nQuestion: what does [Sacha Baron Cohen] appear in\nQuestion type: actor_to_movie\n"
-
 
 def two_hop_type_generator(question):
     prompt = "Given the following operations: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\n"
@@ -110,27 +108,30 @@ def two_hop_type_generator(question):
             + rela_1
             + "\n"
         )
-    # prompt = prompt + " Question: " + question + "\nQuestion type: "
-    # prompt = "Given the following operations: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: which person wrote the films directed by [Yuriy Norshteyn]\nLogical Form: movie_to_writer(director_to_movie([Yuriy Norshteyn]))\nTwo operations: movie_to_writer, director_to_movie\nQuestion: which movies have the same director of [Just Cause]\nLogical Form: director_to_movie(movie_to_director([Yuriy Norshteyn]))\nTwo operations: director_to_movie, movie_to_director\nQuestion: what genres do the movies written by [Maureen Medved]\nLogical Form: movie_to_genre(writer_to_movie([Maureen Medved]))\nTwo operations: movie_to_genre, writer_to_movie\nQuestion: what were the release years of the movies acted by [Todd Field]\nLogical Form: movie_to_year(actor_to_movie([Todd Field]))\nTwo operations: movie_to_year, actor_to_movie\nQuestion: the films written by [Babaloo Mandel] starred which actors\nLogical Form: movie_to_actor(writer_to_movie([Babaloo Mandel]))\nTwo operations: movie_to_actor, writer_to_movie\n"
     prompt = prompt + "Question: " + question + "\nLogical Form: "
-    got_result = False
-    while got_result != True:
+
+    messages = [
+        {"role": "system", "content": "You are an AI assistant."},
+        {"role": "user", "content": prompt},
+    ]
+    while 1:
         try:
-            answer_modi = openai.Completion.create(
-                engine="code-davinci-002",
-                prompt=prompt,
+            response = client.chat.completions.create(
+                model=LLM_engine,
+                messages=messages,
                 temperature=0,
                 max_tokens=256,
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                stop=["Question: "],
+                stop=["Question: ","\n"],
             )
-            got_result = True
-        except:
+            response = json.loads(response.json())
+            gene_type = response["choices"][0]["message"]["content"].strip()
+            return gene_type, response["usage"]
+        except Exception as e:
+            print("error in type generation", e)
             sleep(3)
-    gene_exp = answer_modi["choices"][0]["text"].strip()
-    return gene_exp
 
 
 def retrieve_answer(found_type, found_ent):
@@ -159,7 +160,7 @@ def retrieve_answer(found_type, found_ent):
 
 
 if __name__ == "__main__":
-    openai.api_key = ""
+
     enti_to_fact_dict = {}
     with open("data/metaQA/kb.txt") as f:
         lines = f.readlines()
@@ -181,7 +182,20 @@ if __name__ == "__main__":
     for type, que in zip(train_type_list_3hop, train_question_3hop):
         train_ques_to_type_dict[que["question"]] = type
 
-    corpus = [data["question"] for data in train_question_3hop]
+    # small data
+    test_data = json.load(open("../LLM_KGQA/data/metaqa/test/3-hop.json"))
+    valid_questions_map = {d["question"]:d["id"] for d in test_data}
+    for d in test_question_3hop:
+        d["question"] = d["question"].replace("[", "").replace("]", "")
+    new_test_question = []
+    for d in test_question_3hop:
+        if d["question"] in valid_questions_map:
+            d["id"] = valid_questions_map[d["question"]]
+            new_test_question.append(d)
+    assert len(new_test_question) == 300
+    test_question_3hop = new_test_question
+
+    corpus = [data["question"].replace("[","").replace("]","") for data in train_question_3hop]
     tokenized_train_data = []
     for doc in corpus:
         tokenized_train_data.append(doc.split())
@@ -189,13 +203,17 @@ if __name__ == "__main__":
 
     total = 0
     correct = 0
-    for ques_dict in test_question_3hop:
-        question = ques_dict["question"]
+
+    out = f"save/metaqa/3-hop/KB-BINDER-R-{LLM_engine}"
+    os.makedirs(out, exist_ok=True)
+
+    for item in tqdm(test_question_3hop):
+        question = item["question"]
         print("question: ", question, flush=True)
         got_result = False
         while got_result is not True:
             try:
-                question_type = two_hop_type_generator(question)
+                question_type,usage = two_hop_type_generator(question)
                 # print("question_type: ", question_type)
                 question_type = question_type.split("operations: ")[1]
                 question_type = question_type.split(", ")
@@ -213,7 +231,7 @@ if __name__ == "__main__":
         if len(question_type) < 3:
             set_pred = set()
         else:
-            ent = ques_dict["retrieved_ent"]
+            ent = item["retrieved_ent"]
             first_step_ans = retrieve_answer(question_type[0], ent)
             first_step_ans = list(set(first_step_ans))
             if ent in first_step_ans:
@@ -231,14 +249,18 @@ if __name__ == "__main__":
             pred = []
             for ent_mid in second_step_ans:
                 pred = pred + retrieve_answer(question_type[2], ent_mid)
-            # print("answer: ", ques_dict["answer"], flush=True)
+            # print("answer: ", item["answer"], flush=True)
             # print("pred: ", list(set(pred)))
             set_pred = set(pred)
         if ent in set_pred:
             set_pred.remove(ent)
-        if set_pred == set(ques_dict["answer"]):
+        if set_pred == set(item["answer"]):
             correct += 1
         total += 1
         print("total: ", total, flush=True)
         print("correct: ", correct, flush=True)
         print("accuracy: ", correct / total, flush=True)
+    
+        # save
+        item["prediction"] = pred
+        json.dump(item, open(f"{out}/{item['id']}.json", "w"), indent=4, ensure_ascii=False)

@@ -1,8 +1,9 @@
 import json
 from time import sleep
 
-import openai
-import spacy
+import os
+from tqdm import tqdm
+
 
 type_to_rela_dict = {
     "tag_to_movie": "has_tags",
@@ -19,6 +20,9 @@ type_to_rela_dict = {
 }
 
 
+from metaqa_1hop import client, LLM_engine
+
+
 def type_process(file_name):
     test_type_list = []
     with open(file_name) as f:
@@ -29,8 +33,8 @@ def type_process(file_name):
     return test_type_list
 
 
-# test_type_list_1hop = type_process('data/data/metaQA/qa_test_qtype_1hop.txt')
-# train_type_list_1hop = type_process('data/data/metaQA/qa_train_qtype_1hop.txt')
+# test_type_list_1hop = type_process('data/metaQA/qa_test_qtype_1hop.txt')
+# train_type_list_1hop = type_process('data/metaQA/qa_train_qtype_1hop.txt')
 
 
 def ques_ans_process(file_name):
@@ -52,24 +56,19 @@ def ques_ans_process(file_name):
     return return_dict_list
 
 
-# for type, que in zip(train_type_list_1hop, train_question_1hop):
-#     if type in type_to_ques_dict:
-#         type_to_ques_dict[type].append(que["question"])
-#     else:
-#         type_to_ques_dict[type] = [que["question"]]
-
-
-# prompt_type = "Given the following types: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: what movies are about [ginger rogers] \nQuestion type: tag_to_movie\nQuestion: what movies was [Erik Matti] the writer of\nQuestion type: writer_to_movie\nQuestion: what topics is [Bad Timing] about\nQuestion type: movie_to_tags\nQuestion: [True Romance], when was it released\nQuestion type: movie_to_year\nQuestion: who wrote the screenplay for [True Romance]\nQuestion type: movie_to_writer\nQuestion: what language is [Cabeza de Vaca] in\nQuestion type: movie_to_language\nQuestion: what kind of film is [True Romance]\nQuestion type: movie_to_genre\nQuestion: can you name a film directed by [William Cameron Menzies]\nQuestion type: director_to_movie\nQuestion: who acted in [Terminal Velocity]\nQuestion type: movie_to_actor\nQuestion: who's the director of [True Romance]\nQuestion type: movie_to_director\nQuestion: what does [Sacha Baron Cohen] appear in\nQuestion type: actor_to_movie\n"
 def two_hop_type_generator(question):
-    prompt = "Given the following operations: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: the films that share actors with the film [Dil Chahta Hai] were released in which years\nLogical Form: movie_to_year(actor_to_movie(movie_to_actor([Dil Chahta Hai])))\nThree operations: movie_to_year, actor_to_movie, movie_to_actor\nQuestion: who are the directors of the movies written by the writer of [The Green Mile]\nLogical Form: movie_to_director(writer_to_movie(movie_to_writer([The Green Mile])))\nThree operations: movie_to_director, writer_to_movie, movie_to_writer\nQuestion: what types are the films directed by the director of [For Love or Money]\nLogical Form: movie_to_genre(director_to_movie(movie_to_director([For Love or Money])))\nThree operations: movie_to_genre, director_to_movie, movie_to_director\nQuestion: when did the movies release whose actors also appear in the movie [Cast a Deadly Spell]\nLogical Form: movie_to_year(actor_to_movie(movie_to_actor([Cast a Deadly Spell])))\nThree operations: movie_to_year, actor_to_movie, movie_to_actor\n"
+    prompt = "Given the following operations: actor_to_movie, movie_to_writer, tag_to_movie, writer_to_movie, movie_to_year, director_to_movie, movie_to_language, movie_to_genre, movie_to_director, movie_to_actor, movie_to_tags\nQuestion: the films that share actors with the film [Dil Chahta Hai] were released in which years\nLogical Form: movie_to_year(actor_to_movie(movie_to_actor([Dil Chahta Hai])))\nThree operations: movie_to_year, actor_to_movie, movie_to_actor\nQuestion: who are the directors of the movies written by the writer of [The Green Mile]\nLogical Form: movie_to_director(writer_to_movie(movie_to_writer([The Green Mile])))\nThree operations: movie_to_director, writer_to_movie, movie_to_writer\nQuestion: what types are the films directed by the director of [For Love or Money]\nLogical Form: movie_to_genre(director_to_movie(movie_to_director([For Love or Money])))\nThree operations: movie_to_genre, director_to_movie, movie_to_director\nQuestion: when did the movies release whose actors also appear in the movie [Cast a Deadly Spell]\nLogical Form: movie_to_year(actor_to_movie(movie_to_actor([Cast a Deadly Spell])))\nThree operations: movie_to_year, actor_to_movie, movie_to_actor\n".replace("[","").replace("]","")
     prompt = prompt + "Question: " + question + "\nLogical Form: "
-    got_result = False
-    while got_result != True:
+
+    messages = [
+        {"role": "system", "content": "You are an AI assistant."},
+        {"role": "user", "content": prompt},
+    ]
+    while 1:
         try:
-            # print("promt: ", prompt)
-            answer_modi = openai.Completion.create(
-                engine="code-davinci-002",
-                prompt=prompt,
+            response = client.chat.completions.create(
+                model=LLM_engine,
+                messages=messages,
                 temperature=0,
                 max_tokens=256,
                 top_p=1,
@@ -77,11 +76,12 @@ def two_hop_type_generator(question):
                 presence_penalty=0,
                 stop=["Question: "],
             )
-            got_result = True
-        except:
+            response = json.loads(response.json())
+            gene_type = response["choices"][0]["message"]["content"].strip()
+            return gene_type, response["usage"]
+        except Exception as e:
+            print("error in type generation", e)
             sleep(3)
-    gene_exp = answer_modi["choices"][0]["text"].strip()
-    return gene_exp
 
 
 def retrieve_answer(found_type, found_ent):
@@ -110,9 +110,8 @@ def retrieve_answer(found_type, found_ent):
 
 
 if __name__ == "__main__":
-    openai.api_key = ""
     enti_to_fact_dict = {}
-    with open("data/data/metaQA/kb.txt") as f:
+    with open("data/metaQA/kb.txt") as f:
         lines = f.readlines()
         for line in lines:
             s, r, o = line.split("|")
@@ -125,19 +124,38 @@ if __name__ == "__main__":
             else:
                 enti_to_fact_dict[o.strip()].append(line.strip())
 
-    test_question_3hop = ques_ans_process("data/data/metaQA/qa_test_3hop.txt")
-    # train_question_1hop = ques_ans_process('data/data/metaQA/qa_train_1hop.txt')
+    test_question_3hop = ques_ans_process("data/metaQA/qa_test_3hop.txt")
+
+    # small data
+    test_data = json.load(open("../LLM_KGQA/data/metaqa/test/3-hop.json"))
+    valid_questions_map = {d["question"]:d["id"] for d in test_data}
+    for d in test_question_3hop:
+        d["question"] = d["question"].replace("[", "").replace("]", "")
+    new_test_question = []
+    for d in test_question_3hop:
+        if d["question"] in valid_questions_map:
+            d["id"] = valid_questions_map[d["question"]]
+            new_test_question.append(d)
+    assert len(new_test_question) == 300
+    test_question_3hop = new_test_question
+
     type_to_ques_dict = {}
 
     total = 0
     correct = 0
-    for ques_dict in test_question_3hop:
-        question = ques_dict["question"]
+
+    out = f"save/metaqa/3-hop/KB-BINDER-{LLM_engine}"
+    os.makedirs(out, exist_ok=True)
+
+    def _func(item):
+        if os.path.exists(f"{out}/{item['id']}.json"):
+            return  
+        question = item["question"]
         print("question: ", question, flush=True)
         got_result = False
         while got_result is not True:
             try:
-                question_type = two_hop_type_generator(question)
+                question_type,usage = two_hop_type_generator(question)
                 # print("question_type: ", question_type)
                 question_type = question_type.split("operations: ")[1]
                 question_type = question_type.split(", ")
@@ -148,39 +166,53 @@ if __name__ == "__main__":
                 rela_1 = question_type[1]
                 rela_2 = question_type[2]
                 got_result = True
-            except:
+            except Exception as e:
+                print("error in type generation", e)
                 sleep(3)
         question_type.reverse()
         print("question_type: ", question_type, flush=True)
-        if len(question_type) < 3:
-            set_pred = set()
-        else:
-            ent = ques_dict["retrieved_ent"]
-            first_step_ans = retrieve_answer(question_type[0], ent)
-            first_step_ans = list(set(first_step_ans))
-            if ent in first_step_ans:
-                first_step_ans.remove(ent)
-            print("first_step_ans: ", first_step_ans, flush=True)
-            second_step_ans = []
-            for ent_mid in first_step_ans:
-                second_step_ans = second_step_ans + retrieve_answer(
-                    question_type[1], ent_mid
-                )
-            second_step_ans = list(set(second_step_ans))
-            if ent in second_step_ans:
-                second_step_ans.remove(ent)
-            # print("second_step_ans: ", second_step_ans, flush=True)
-            pred = []
-            for ent_mid in second_step_ans:
-                pred = pred + retrieve_answer(question_type[2], ent_mid)
-            # print("answer: ", ques_dict["answer"], flush=True)
-            # print("pred: ", list(set(pred)))
-            set_pred = set(pred)
-        if ent in set_pred:
-            set_pred.remove(ent)
-        if set_pred == set(ques_dict["answer"]):
-            correct += 1
-        total += 1
-        print("total: ", total, flush=True)
-        print("correct: ", correct, flush=True)
-        print("accuracy: ", correct / total, flush=True)
+        
+        try:
+            if len(question_type) < 3:
+                set_pred = set()
+            else:
+                ent = item["retrieved_ent"]
+                first_step_ans = retrieve_answer(question_type[0], ent)
+                first_step_ans = list(set(first_step_ans))
+                if ent in first_step_ans:
+                    first_step_ans.remove(ent)
+                print("first_step_ans: ", first_step_ans, flush=True)
+                second_step_ans = []
+                for ent_mid in first_step_ans:
+                    second_step_ans = second_step_ans + retrieve_answer(
+                        question_type[1], ent_mid
+                    )
+                second_step_ans = list(set(second_step_ans))
+                if ent in second_step_ans:
+                    second_step_ans.remove(ent)
+                # print("second_step_ans: ", second_step_ans, flush=True)
+                pred = []
+                for ent_mid in second_step_ans:
+                    pred = pred + retrieve_answer(question_type[2], ent_mid)
+                # print("answer: ", item["answer"], flush=True)
+                # print("pred: ", list(set(pred)))
+                set_pred = set(pred)
+            if ent in set_pred:
+                set_pred.remove(ent)
+            # if set_pred == set(item["answer"]):
+            #     correct += 1
+            # total += 1
+            # print("total: ", total, flush=True)
+            # print("correct: ", correct, flush=True)
+            # print("accuracy: ", correct / total, flush=True)
+        except Exception as e:
+            print("error in prediction", e)
+            pred = None
+        # save
+        item["prediction"] = pred
+        json.dump(item, open(f"{out}/{item['id']}.json", "w"), indent=4, ensure_ascii=False)
+
+    data =  tqdm(test_question_3hop)
+    from multiprocessing.dummy import Pool as ThreadPool
+    pool = ThreadPool(1)
+    pool.map(_func, data)

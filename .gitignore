@@ -143,3 +143,4 @@ data/
 *.zip
 index
 *.tar.gz
+save/

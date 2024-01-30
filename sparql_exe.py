@@ -885,7 +885,7 @@ def get_2hop_relations(entity: str):
             PREFIX : <http://rdf.freebase.com/ns/>
             SELECT distinct ?x0 as ?r0 ?y as ?r1 WHERE {
             """
-        "?x1 ?x0 " + ":" + entity + ". "
+        "?x1 ?x0 " + ":" + entity + " . "
         """
                 ?x2 ?y ?x1 .
                   FILTER regex(?x0, "http://rdf.freebase.com/ns/")

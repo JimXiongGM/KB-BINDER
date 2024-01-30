@@ -1,12 +1,17 @@
 import os
+
+os.environ["https_proxy"] = "http://127.0.0.1:7893"
+os.environ["http_proxy"] = "http://127.0.0.1:7893"
+
 import argparse
 import itertools
 import json
-import logging
+
 import random
 import re
 from collections import Counter
 from time import sleep
+from tqdm import tqdm
 
 import openai
 import spacy
@@ -14,20 +19,24 @@ from pyserini.search import FaissSearcher, LuceneSearcher
 from pyserini.search.faiss import AutoQueryEncoder
 from pyserini.search.hybrid import HybridSearcher
 from rank_bm25 import BM25Okapi
-
+from loguru import logger
 from sparql_exe import execute_query, get_2hop_relations, get_types, lisp_to_sparql
 from utils import process_file, process_file_node
 
-logging.getLogger().setLevel(logging.INFO)
-logging.basicConfig(
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("time recoder")
+DEFAULT_KEY = os.environ.get("OPENAI_API_KEY", None)
+assert DEFAULT_KEY is not None, "OPENAI_API_KEY is None"
+client = openai.OpenAI(api_key=DEFAULT_KEY)
 
 
 def select_shot_prompt_train(train_data_in, shot_number):
+    """
+    本函数对问题进行了简单的分类，分为了两类，一类是包含了比较关系的问题，一类是不包含比较关系的问题。
+    一些观察
+    - webqsp数据，compare类型的数据例如：
+    ['where did galileo go to school', 'who does joakim noah play for', 'what did doctor kevorkian do', 'who is the president of israel 2012',
+        除了最后一个，前面的并没有比较关系。
+    """
+    train_data_in = [d for d in train_data_in if d["s_expression"]]
     random.shuffle(train_data_in)
     compare_list = ["le", "ge", "gt", "lt", "ARGMIN", "ARGMAX"]
     if shot_number == 1:
@@ -82,17 +91,23 @@ def sub_mid_to_fn(question, string, question_to_mid_dict):
     return new_string
 
 
-def type_generator(question, prompt_type, api_key, LLM_engine):
+def type_generator(question, prompt_type, LLM_engine):
+    """
+    这个函数先生成问题的type？
+    """
     sleep(1)
     prompt = prompt_type
-    prompt = prompt + " Question: " + question + "Type of the question: "
+    prompt = prompt + " Question: " + question + "\nType of the question: "
+    messages = [
+        {"role": "system", "content": "You are an AI assistant."},
+        {"role": "user", "content": prompt},
+    ]
     got_result = False
     while got_result != True:
         try:
-            openai.api_key = api_key
-            answer_modi = openai.Completion.create(
-                engine=LLM_engine,
-                prompt=prompt,
+            response = client.chat.completions.create(
+                model=LLM_engine,
+                messages=messages,
                 temperature=0,
                 max_tokens=256,
                 top_p=1,
@@ -100,11 +115,12 @@ def type_generator(question, prompt_type, api_key, LLM_engine):
                 presence_penalty=0,
                 stop=["Question: "],
             )
-            got_result = True
-        except:
+            response = json.loads(response.json())
+            gene_type = response["choices"][0]["message"]["content"].strip()
+            return gene_type, response["usage"]
+        except Exception as e:
+            print("error in type generation", e)
             sleep(3)
-    gene_exp = answer_modi["choices"][0]["text"].strip()
-    return gene_exp
 
 
 def ep_generator(
@@ -113,7 +129,6 @@ def ep_generator(
     temp,
     que_to_s_dict_train,
     question_to_mid_dict,
-    api_key,
     LLM_engine,
     retrieval=False,
     corpus=None,
@@ -130,6 +145,8 @@ def ep_generator(
         logger.info("top_score: {}".format(top_score))
         logger.info("top related questions: {}".format(top_ques))
         selected_examples = top_ques
+    
+    instruction = "Please write the s-expression for the given question based on the format provided.\n\n"
     prompt = ""
     for que in selected_examples:
         if not que_to_s_dict_train[que]:
@@ -143,27 +160,45 @@ def ep_generator(
             + sub_mid_to_fn(que, que_to_s_dict_train[que], question_to_mid_dict)
             + "\n"
         )
-    prompt = prompt + "Question: " + question + "\n" + "Logical Form: "
+    prompt = instruction + prompt + "Question: " + question + "\n" # + "Logical Form: "
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an AI assistant. Follow the format to complete the task.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    with open(f".temp-out-R{retrieval}.txt", "a") as f:
+        f.write(prompt + "\nEND!")
+
     got_result = False
     while got_result != True:
         try:
-            openai.api_key = api_key
-            answer_modi = openai.Completion.create(
-                engine=LLM_engine,
-                prompt=prompt,
+            # 只有这里保存了多个生成结果
+            response = client.chat.completions.create(
+                model=LLM_engine,
+                messages=messages,
                 temperature=temp,
-                max_tokens=256,
                 top_p=1,
-                frequency_penalty=0,
-                presence_penalty=0,
-                stop=["Question: "],
                 n=7,
+                stop=["Question: ", "\n"],
+                max_tokens=256,
+                presence_penalty=0,
+                frequency_penalty=0,
             )
-            got_result = True
-        except:
+            response = json.loads(response.json())
+            gene_exp = [
+                exp["message"]["content"].strip() for exp in response["choices"]
+            ]
+            for i in range(len(gene_exp)):
+                gene_exp[i] = gene_exp[i].replace("Logical Form: ", "")
+            print("gene exp all:", gene_exp)
+            return gene_exp, response["usage"]
+        except Exception as e:
+            print("error in ep generation", e)
             sleep(3)
-    gene_exp = [exp["text"].strip() for exp in answer_modi["choices"]]
-    return gene_exp
 
 
 def convert_to_frame(s_exp):
@@ -193,6 +228,9 @@ def convert_to_frame(s_exp):
 
 
 def find_friend_name(gene_exp, org_question):
+    """
+    一个很简单的friend name解析器？
+    """
     seg_list = gene_exp.split()
     phrase_set = [
         "(JOIN",
@@ -229,6 +267,9 @@ def find_friend_name(gene_exp, org_question):
 
 
 def get_right_mid_set(fn, id_dict, question):
+    """
+    id_dict: {mid: score} list
+    """
     type_to_mid_dict = {}
     type_list = []
     for mid in id_dict:
@@ -245,8 +286,11 @@ def get_right_mid_set(fn, id_dict, question):
     #     tokenized_question = tokenizer.tokenize(question)
     tokenized_question = question.split()
     bm25 = BM25Okapi(tokenized_type_list)
+
+    # 这里居然把mids的type全部搜集到一起，然后以tokenized question为query，搜集top10的type？？为什么能用分词后的question来搜集type呢？猜测：question中会出现type的名字，例如：'what does jamaican people speak'
     top10_types = bm25.get_top_n(tokenized_question, type_list, n=10)
-    selected_types = top10_types[:3]
+
+    selected_types = top10_types[:3]  # 为什么不直接n=3呢？
     selected_mids = []
     for any_type in selected_types:
         # logger.info("any_type: {}".format(any_type))
@@ -272,6 +316,8 @@ def from_fn_to_id_set(fn_list, question, name_to_id_dict, bm25_all_fns, all_fns)
             fn = fn_org
         if fn.lower() in name_to_id_dict:
             id_dict = name_to_id_dict[fn.lower()]
+
+        # name 对应的 mids 数量太多
         if len(id_dict) > 15:
             mids = get_right_mid_set(fn.lower(), id_dict, question)
         else:
@@ -344,7 +390,8 @@ def bound_to_existed(
 ):
     possible_relationships_can = []
     possible_relationships = []
-    # logger.info("before 2 hop rela")
+
+    logger.info("before 2 hop rela")
     updating_two_hop_rela_dict = two_hop_rela_dict.copy()
     for mid in found_mids:
         if mid in updating_two_hop_rela_dict:
@@ -356,7 +403,8 @@ def bound_to_existed(
             updating_two_hop_rela_dict[mid] = relas
             possible_relationships_can += list(set(relas[0]))
             possible_relationships_can += list(set(relas[1]))
-    # logger.info("after 2 hop rela")
+
+    logger.info("after 2 hop rela")
     for rela in possible_relationships_can:
         if (
             not rela.startswith("common")
@@ -367,7 +415,8 @@ def bound_to_existed(
     if not possible_relationships:
         possible_relationships = relationships.copy()
     expression_segment = s_expression.split(" ")
-    # print("possible_relationships: ", possible_relationships)
+
+    print("possible_relationships: ", possible_relationships)
     possible_relationships = list(set(possible_relationships))
     relationship_replace_dict = {}
     lemma_tags = {"NNS", "NNPS"}
@@ -389,13 +438,18 @@ def bound_to_existed(
             tokenized_query = " ".join(tokenized_query)
             tokenized_question = question.strip(" ?")
             tokenized_query = tokenized_query + " " + tokenized_question
+
+            # 这里是重点，把谓词和Q拼到一起，然后用hybrid search来搜索relation
             searched_results = hsearcher.search(tokenized_query, k=1000)
+
             top3_ques = []
             for hit in searched_results:
                 if len(top3_ques) > 7:
                     break
                 cur_result = json.loads(rela_corpus.doc(str(hit.docid)).raw())
                 cur_rela = cur_result["rel_ori"]
+
+                # cur_rela in possible_relationships 是重点，也是做了一个约束，必须在mid的两跳以内
                 if (
                     not cur_rela.startswith("base.")
                     and not cur_rela.startswith("common.")
@@ -404,6 +458,7 @@ def bound_to_existed(
                     and cur_rela in possible_relationships
                 ):
                     top3_ques.append(cur_rela)
+
             logger.info("top3_ques rela: {}".format(top3_ques))
             relationship_replace_dict[i] = top3_ques[:7]
     if len(relationship_replace_dict) > 5:
@@ -414,7 +469,8 @@ def bound_to_existed(
     combinations = list(relationship_replace_dict.values())
     all_iters = list(itertools.product(*combinations))
     rela_index = list(relationship_replace_dict.keys())
-    # logger.info("all_iters: {}".format(all_iters))
+    
+    logger.info("all_iters: {}".format(all_iters))
     for iters in all_iters:
         expression_segment_copy = expression_segment.copy()
         possible_entities_set = []
@@ -509,7 +565,7 @@ def process_file_codex_output(filename_before, filename_after):
 
 
 def all_combiner_evaluation(
-    data_batch,
+    item,
     selected_quest_compare,
     selected_quest_compose,
     selected_quest,
@@ -520,7 +576,6 @@ def all_combiner_evaluation(
     temp,
     que_to_s_dict_train,
     question_to_mid_dict,
-    api_key,
     LLM_engine,
     name_to_id_dict,
     bm25_all_fns,
@@ -532,136 +587,161 @@ def all_combiner_evaluation(
     bm25_train_full=None,
     retrieve_number=100,
 ):
-    correct = [0] * 6
-    total = [0] * 6
-    no_ans = [0] * 6
-    for data in data_batch:
-        logger.info("==========")
-        logger.info("data[id]: {}".format(data["id"]))
-        logger.info("data[question]: {}".format(data["question"]))
-        logger.info("data[exp]: {}".format(data["s_expression"]))
-        label = []
-        for ans in data["answer"]:
-            label.append(ans["answer_argument"])
-        if not retrieval:
-            gene_type = type_generator(
-                data["question"], prompt_type, api_key, LLM_engine
-            )
-            logger.info("gene_type: {}".format(gene_type))
-        else:
-            gene_type = None
+    # correct = [0] * 6
+    # total = [0] * 6
+    # no_ans = [0] * 6
+    # for idx, item in enumerate(data_batch):
+    if retrieval:
+        out = f"save/webqsp/KB-BINDER-R-{LLM_engine}"
+    else:
+        out = f"save/webqsp/KB-BINDER-{LLM_engine}"
+    os.makedirs(out, exist_ok=True)
+    # if exisited, skip
+    if os.path.exists(f"{out}/{item['id']}.json"):
+        return
+    # logger.info(f"====={idx}/{len(data_batch)}=====")
+    logger.info("item[id]: {}".format(item["id"]))
+    logger.info("item[question]: {}".format(item["question"]))
+    logger.info("item[exp]: {}".format(item["s_expression"]))
+    label = []
+    for ans in item["answer"]:
+        label.append(ans["answer_argument"])
+    if not retrieval:
+        gene_type, gene_type_usage = type_generator(
+            item["question"], prompt_type, LLM_engine
+        )
+        logger.info("gene_type: {}".format(gene_type))
+    else:
+        gene_type = None
 
-        if gene_type == "Comparison":
-            gene_exps = ep_generator(
-                data["question"],
-                list(set(selected_quest_compare) | set(selected_quest)),
-                temp,
-                que_to_s_dict_train,
-                question_to_mid_dict,
-                api_key,
-                LLM_engine,
-                retrieval=retrieval,
-                corpus=corpus,
-                nlp_model=nlp_model,
-                bm25_train_full=bm25_train_full,
-                retrieve_number=retrieve_number,
+    if gene_type == "Comparison":
+        gene_exps, gen_exps_usage = ep_generator(
+            item["question"],
+            list(set(selected_quest_compare) | set(selected_quest)),
+            temp,
+            que_to_s_dict_train,
+            question_to_mid_dict,
+            LLM_engine,
+            retrieval=retrieval,
+            corpus=corpus,
+            nlp_model=nlp_model,
+            bm25_train_full=bm25_train_full,
+            retrieve_number=retrieve_number,
+        )
+    else:
+        gene_exps, gen_exps_usage = ep_generator(
+            item["question"],
+            list(set(selected_quest_compose) | set(selected_quest)),
+            temp,
+            que_to_s_dict_train,
+            question_to_mid_dict,
+            LLM_engine,
+            retrieval=retrieval,
+            corpus=corpus,
+            nlp_model=nlp_model,
+            bm25_train_full=bm25_train_full,
+            retrieve_number=retrieve_number,
+        )
+    two_hop_rela_dict = {}
+    answer_candi = []
+    removed_none_candi = []
+    answer_to_grounded_dict = {}
+    logger.info("gene_exps: {}".format(gene_exps))
+    scouts = gene_exps[:6]
+    for idx, gene_exp in enumerate(scouts):
+        try:
+            logger.info(f"{idx}/{len(scouts)} gene_exp: {gene_exp}")
+            join_num = number_of_join(gene_exp)
+            if join_num > 5:
+                continue
+            if join_num > 3:
+                top_mid = 5
+            else:
+                top_mid = 15
+            # 从生成的s-expr中解析出mention。居然也不加一个括号什么的
+            found_names = find_friend_name(gene_exp, item["question"])
+            found_mids = from_fn_to_id_set(
+                found_names,
+                item["question"],
+                name_to_id_dict,
+                bm25_all_fns,
+                all_fns,
             )
-        else:
-            gene_exps = ep_generator(
-                data["question"],
-                list(set(selected_quest_compose) | set(selected_quest)),
-                temp,
-                que_to_s_dict_train,
-                question_to_mid_dict,
-                api_key,
-                LLM_engine,
-                retrieval=retrieval,
-                corpus=corpus,
-                nlp_model=nlp_model,
-                bm25_train_full=bm25_train_full,
-                retrieve_number=retrieve_number,
-            )
-        two_hop_rela_dict = {}
-        answer_candi = []
-        removed_none_candi = []
-        answer_to_grounded_dict = {}
-        logger.info("gene_exps: {}".format(gene_exps))
-        scouts = gene_exps[:6]
-        for idx, gene_exp in enumerate(scouts):
-            try:
-                logger.info("gene_exp: {}".format(gene_exp))
-                join_num = number_of_join(gene_exp)
-                if join_num > 5:
-                    continue
-                if join_num > 3:
-                    top_mid = 5
-                else:
-                    top_mid = 15
-                found_names = find_friend_name(gene_exp, data["question"])
-                found_mids = from_fn_to_id_set(
-                    found_names,
-                    data["question"],
-                    name_to_id_dict,
-                    bm25_all_fns,
-                    all_fns,
+            found_mids = [mids[:top_mid] for mids in found_mids]
+            mid_combinations = list(itertools.product(*found_mids))
+            # logger.info("all_iters: {}".format(mid_combinations))
+            for mid_iters in mid_combinations:
+                # logger.info("mid_iters: {}".format(mid_iters))
+
+                # 将s-expr中的mention替换为mid
+                replaced_exp = convz_fn_to_mids(gene_exp, found_names, mid_iters)
+
+                answer, two_hop_rela_dict, bounded_exp = bound_to_existed(
+                    item["question"],
+                    replaced_exp,
+                    mid_iters,
+                    two_hop_rela_dict,
+                    relationship_to_enti,
+                    hsearcher,
+                    rela_corpus,
+                    relationships,
                 )
-                found_mids = [mids[:top_mid] for mids in found_mids]
-                mid_combinations = list(itertools.product(*found_mids))
-                logger.info("all_iters: {}".format(mid_combinations))
-                for mid_iters in mid_combinations:
-                    logger.info("mid_iters: {}".format(mid_iters))
-                    replaced_exp = convz_fn_to_mids(gene_exp, found_names, mid_iters)
+                answer_candi.append(answer)
+                if answer is not None:
+                    answer_to_grounded_dict[tuple(answer)] = bounded_exp
+            for ans in answer_candi:
+                if ans != None:
+                    removed_none_candi.append(ans)
+            if not removed_none_candi:
+                answer = None
+            else:
+                count_dict = Counter([tuple(candi) for candi in removed_none_candi])
+                logger.info("count_dict: {}".format(count_dict))
+                answer = max(count_dict, key=count_dict.get)
+        except:
+            if not removed_none_candi:
+                answer = None
+            else:
+                count_dict = Counter([tuple(candi) for candi in removed_none_candi])
+                logger.info("count_dict: {}".format(count_dict))
+                answer = max(count_dict, key=count_dict.get)
 
-                    answer, two_hop_rela_dict, bounded_exp = bound_to_existed(
-                        data["question"],
-                        replaced_exp,
-                        mid_iters,
-                        two_hop_rela_dict,
-                        relationship_to_enti,
-                        hsearcher,
-                        rela_corpus,
-                        relationships,
-                    )
-                    answer_candi.append(answer)
-                    if answer is not None:
-                        answer_to_grounded_dict[tuple(answer)] = bounded_exp
-                for ans in answer_candi:
-                    if ans != None:
-                        removed_none_candi.append(ans)
-                if not removed_none_candi:
-                    answer = None
-                else:
-                    count_dict = Counter([tuple(candi) for candi in removed_none_candi])
-                    logger.info("count_dict: {}".format(count_dict))
-                    answer = max(count_dict, key=count_dict.get)
-            except:
-                if not removed_none_candi:
-                    answer = None
-                else:
-                    count_dict = Counter([tuple(candi) for candi in removed_none_candi])
-                    logger.info("count_dict: {}".format(count_dict))
-                    answer = max(count_dict, key=count_dict.get)
-            answer_to_grounded_dict[None] = ""
-            logger.info("predicted_answer: {}".format(answer))
-            logger.info("label: {}".format(label))
-            if answer is None:
-                no_ans[idx] += 1
-            elif set(answer) == set(label):
-                correct[idx] += 1
-            total[idx] += 1
-            em_score = correct[idx] / total[idx]
-            logger.info(
-                "================================================================"
-            )
-            logger.info("consistent candidates number: {}".format(idx + 1))
-            logger.info("em_score: {}".format(em_score))
-            logger.info("correct: {}".format(correct[idx]))
-            logger.info("total: {}".format(total[idx]))
-            logger.info("no_ans: {}".format(no_ans[idx]))
-            logger.info(" ")
-            logger.info(
-                "================================================================"
-            )
+        # 这里还是在6个expr循环中 使用idx来记录每一个expr的结果
+        # 6个expr中只需要有一个正确就行？？exact match的定义真是golden中有一个在predic中就算正确，这里放松为6个expr中有一个正确就行？
+        answer_to_grounded_dict[None] = ""
+        # logger.info("predicted_answer: {}".format(answer))
+        # logger.info("label: {}".format(label))
+        # if answer is None:
+        #     no_ans[idx] += 1
+        # elif set(answer) == set(label):
+        #     correct[idx] += 1
+        # total[idx] += 1
+        # em_score = correct[idx] / total[idx]
+        # logger.info(
+        #     "================================================================"
+        # )
+        # logger.info("consistent candidates number: {}".format(idx + 1))
+        # logger.info("em_score: {}".format(em_score))
+        # logger.info("correct: {}".format(correct[idx]))
+        # logger.info("total: {}".format(total[idx]))
+        # logger.info("no_ans: {}".format(no_ans[idx]))
+        # logger.info(" ")
+        # logger.info(
+        #     "================================================================"
+        # )
+
+    # save a out dict for each item
+    item["model_name"] = LLM_engine
+    item["raw_out"] = scouts
+    item["removed_none_candi"] = removed_none_candi
+    # item["em_score"] = em_score
+    item["gene_type_usage"] = gene_type_usage
+    item["gen_exps_usage"] = gen_exps_usage
+
+    # save to "save/webqsp/KB-BINDER-{model_name}/{id}.json"
+    logger.info("saving to {}".format(f"{out}/{item['id']}.json"))
+    with open(f"{out}/{item['id']}.json", "w") as f:
+        json.dump(item, f, indent=4, ensure_ascii=False)
 
 
 def parse_args():
@@ -682,13 +762,6 @@ def parse_args():
         help="the temperature of LLM",
     )
     parser.add_argument(
-        "--api_key",
-        type=str,
-        metavar="N",
-        default=None,
-        help="the api key to access LLM",
-    )
-    parser.add_argument(
         "--engine",
         type=str,
         metavar="N",
@@ -704,7 +777,7 @@ def parse_args():
         "--train_data_path",
         type=str,
         metavar="N",
-        default="data/GrailQA/grailqa_v1.0_train.json",
+        default="item/GrailQA/grailqa_v1.0_train.json",
         help="training data path",
     )
     parser.add_argument(
@@ -730,7 +803,6 @@ def parse_args():
     )
 
     args = parser.parse_args()
-    args.api_key = os.environ["OPENAI_API_KEY"]
     return args
 
 
@@ -738,21 +810,32 @@ def main():
     args = parse_args()
     nlp = spacy.load("en_core_web_sm")
     bm25_searcher = LuceneSearcher("contriever_fb_relation/index_relation_fb")
-    query_encoder = AutoQueryEncoder(encoder_dir="PLMs/facebook/contriever", pooling="mean")
+    query_encoder = AutoQueryEncoder(
+        encoder_dir="PLMs/facebook/contriever", pooling="mean"
+    )
     contriever_searcher = FaissSearcher(
         "contriever_fb_relation/freebase_contriever_index", query_encoder
     )
     hsearcher = HybridSearcher(contriever_searcher, bm25_searcher)
-    
+
     # rela_corpus 和 bm25_searcher 一样 ？？？
     rela_corpus = LuceneSearcher("contriever_fb_relation/index_relation_fb")
-    
+
+    # process_file: 没做处理，直接返回了一个list
     dev_data = process_file(args.eva_data_path)
     train_data = process_file(args.train_data_path)
     que_to_s_dict_train = {
         data["question"]: data["s_expression"] for data in train_data
     }
+
+    # debug
+    # dev_data = dev_data[:]
+    # train_data = train_data[:100]
+
+    # process_file_node: 返回一个 q:mid list
+    # e.g. 'who is playing bilbo baggins': {'m.0g6z1': 'bilbo baggins'}
     question_to_mid_dict = process_file_node(args.train_data_path)
+
     if not args.retrieval:
         (
             selected_quest_compose,
@@ -770,6 +853,16 @@ def main():
         nlp_doc = nlp(doc)
         tokenized_train_data.append([token.lemma_ for token in nlp_doc])
     bm25_train_full = BM25Okapi(tokenized_train_data)
+
+    # prompt_type 举例
+    """
+    Question: what countries are the mediterranean
+    Type of the question: Composition
+    Question: what drugs does charlie sheen do
+    Type of the question: Comparison
+    Question: when did venus williams win wimbledon
+    Type of the question: Comparison
+    """
     if not args.retrieval:
         prompt_type = ""
         random.shuffle(all_ques)
@@ -793,46 +886,79 @@ def main():
         entities_set.append(info[2])
         relationship_to_enti[info[1]] = [info[0], info[2]]
 
-    with open(args.surface_map_path) as f:
-        lines = f.readlines()
     name_to_id_dict = {}
-    for line in lines:
-        info = line.split("\t")
-        name = info[0]
-        score = float(info[1])
-        mid = info[2].strip()
-        if name in name_to_id_dict:
-            name_to_id_dict[name][mid] = score
-        else:
-            name_to_id_dict[name] = {}
-            name_to_id_dict[name][mid] = score
+    with open(args.surface_map_path) as f:
+        # lines = f.readlines()
+        for line in tqdm(
+            f, desc="loading surface map", total=59956543, dynamic_ncols=True
+        ):
+            info = line.split("\t")
+            name = info[0]
+            score = float(info[1])
+            mid = info[2].strip()
+            if name in name_to_id_dict:
+                name_to_id_dict[name][mid] = score
+            else:
+                name_to_id_dict[name] = {}
+                name_to_id_dict[name][mid] = score
+
     all_fns = list(name_to_id_dict.keys())
     tokenized_all_fns = [fn.split() for fn in all_fns]
     bm25_all_fns = BM25Okapi(tokenized_all_fns)
-    all_combiner_evaluation(
-        dev_data,
-        selected_quest_compose,
-        selected_quest_compare,
-        selected_quest,
-        prompt_type,
-        hsearcher,
-        rela_corpus,
-        relationships,
-        args.temperature,
-        que_to_s_dict_train,
-        question_to_mid_dict,
-        args.api_key,
-        args.engine,
-        name_to_id_dict,
-        bm25_all_fns,
-        all_fns,
-        relationship_to_enti,
+
+    from multiprocessing.dummy import Pool
+    import functools
+
+    # all_combiner_evaluation(
+    #     dev_data,
+    #     selected_quest_compose,
+    #     selected_quest_compare,
+    #     selected_quest,
+    #     prompt_type,
+    #     hsearcher,
+    #     rela_corpus,
+    #     relationships,
+    #     args.temperature,
+    #     que_to_s_dict_train,
+    #     question_to_mid_dict,
+    #     args.    #     args.engine,
+    #     name_to_id_dict,
+    #     bm25_all_fns,
+    #     all_fns,
+    #     relationship_to_enti,
+    #     retrieval=args.retrieval,
+    #     corpus=corpus,
+    #     nlp_model=nlp,
+    #     bm25_train_full=bm25_train_full,
+    #     retrieve_number=args.shot_num,
+    # )
+
+    mapper = functools.partial(
+        all_combiner_evaluation,
+        selected_quest_compose=selected_quest_compose,
+        selected_quest_compare=selected_quest_compare,
+        selected_quest=selected_quest,
+        prompt_type=prompt_type,
+        hsearcher=hsearcher,
+        rela_corpus=rela_corpus,
+        relationships=relationships,
+        temp=args.temperature,
+        que_to_s_dict_train=que_to_s_dict_train,
+        question_to_mid_dict=question_to_mid_dict,
+        LLM_engine=args.engine,
+        name_to_id_dict=name_to_id_dict,
+        bm25_all_fns=bm25_all_fns,
+        all_fns=all_fns,
+        relationship_to_enti=relationship_to_enti,
         retrieval=args.retrieval,
         corpus=corpus,
         nlp_model=nlp,
         bm25_train_full=bm25_train_full,
         retrieve_number=args.shot_num,
     )
+    print("retrieval:",args.retrieval)
+    pool = Pool(processes=100)
+    pool.map(mapper, tqdm(dev_data))
 
 
 if __name__ == "__main__":
