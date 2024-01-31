@@ -144,3 +144,5 @@ data/
 index
 *.tar.gz
 save/
+.temp-*
+PLMs
